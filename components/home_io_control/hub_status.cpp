@@ -130,13 +130,14 @@ void decode_status_fields(IoDevice &dev, const IoFrame &frame, uint8_t target_of
   float const previous_position = dev.position;
   decode_position_report(tgt, cur, dev.is_stopped, dev.target, dev.position);
   // Tilt covers (Somfy exterior venetian, type 0x11) store the main parameter of the last EXECUTE
-  // they ran and report it back as target/current. A slat-only move from a 1W wall remote or
-  // another hub carries 0xD200 ("current") or 0xD400 ("ignore"), i.e. "height unchanged", so a
-  // stopped device reporting one of those markers has not moved: keep the last known height
-  // instead of degrading to UNKNOWN until the next full travel.
-  uint8_t const cur_marker = static_cast<uint8_t>(cur >> 8);
+  // they ran and report markers instead of a height after a slat-only move: 0xD200 ("current")
+  // from 1W wall remotes, 0xD400 ("ignore") from a tilt-only EXECUTE, and 0xD800 has been seen in
+  // the current field too (captured: `04 05 00 D4 00 D8 00 00 00 .. .. .. 01 20 60 8D 00`). A
+  // stopped device reporting a marker as its current position has not changed height, so keep the
+  // last known height instead of degrading to UNKNOWN until the next full travel. A real move
+  // (including to the favorite position) reports a real current value and is decoded normally.
   if (dev.position == UNKNOWN_POSITION && previous_position != UNKNOWN_POSITION && dev.is_stopped &&
-      has_feature(dev.features, device_feature::TILT) && (cur_marker == POS_STOP || cur_marker == POS_UNKNOWN)) {
+      has_feature(dev.features, device_feature::TILT) && cur > STATUS_POS_MAX) {
     dev.position = previous_position;
     if (dev.target == UNKNOWN_POSITION)
       dev.target = previous_position;
