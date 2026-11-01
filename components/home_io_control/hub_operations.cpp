@@ -446,6 +446,16 @@ bool IOHomeControlComponent::set_device_tilt(const std::string &device_id, uint8
       device_id, {action, false}, [](const IoDevice &d) { return detail::known_device_accepts_execute_tilt(d); },
       "tilt-capable cover",
       [this, tilt_percent](IoFrame &request, const IoDevice &d) {
+        // A tilt-only EXECUTE carries main parameter 0xD400 ("ignore"). Somfy exterior venetian
+        // motors (type 0x11) echo that marker back as their target/current position, so every
+        // later status poll decodes as UNKNOWN until the next full travel. The original TaHoma
+        // hub avoids this by sending the motor's known position as the main parameter
+        // (captured: `01 67 C8 00 20 C8 00 00`). Do the same whenever a settled position is known.
+        if (d.position != UNKNOWN_POSITION && effective_is_stopped(d)) {
+          const auto position = static_cast<uint8_t>(std::lround(d.position));
+          return create_execute_position_and_tilt(request, this->node_id_, d.node_id, d.low_power, position,
+                                                  tilt_percent);
+        }
         return create_execute_tilt(request, this->node_id_, d.node_id, d.low_power, tilt_percent);
       });
 }

@@ -127,7 +127,22 @@ void decode_status_fields(IoDevice &dev, const IoFrame &frame, uint8_t target_of
                           bool allow_tilt_from_extended_response, const std::string &id, bool follow_up_possible) {
   uint16_t const tgt = (frame.data[target_offset] << 8) | frame.data[target_offset + 1];
   uint16_t const cur = (frame.data[current_offset] << 8) | frame.data[current_offset + 1];
+  float const previous_position = dev.position;
   decode_position_report(tgt, cur, dev.is_stopped, dev.target, dev.position);
+  // Tilt covers (Somfy exterior venetian, type 0x11) store the main parameter of the last EXECUTE
+  // they ran and report it back as target/current. A slat-only move from a 1W wall remote or
+  // another hub carries 0xD200 ("current") or 0xD400 ("ignore"), i.e. "height unchanged", so a
+  // stopped device reporting one of those markers has not moved: keep the last known height
+  // instead of degrading to UNKNOWN until the next full travel.
+  uint8_t const cur_marker = static_cast<uint8_t>(cur >> 8);
+  if (dev.position == UNKNOWN_POSITION && previous_position != UNKNOWN_POSITION && dev.is_stopped &&
+      has_feature(dev.features, device_feature::TILT) && (cur_marker == POS_STOP || cur_marker == POS_UNKNOWN)) {
+    dev.position = previous_position;
+    if (dev.target == UNKNOWN_POSITION)
+      dev.target = previous_position;
+    ESP_LOGD(detail::TAG, "Device %s: status carries height marker 0x%04X while stopped; keeping last known position %.0f%%",
+             id.c_str(), cur, previous_position);
+  }
   settle_stopped_report(id, dev, follow_up_possible);
   // A decoded position is the observation this prediction existed to stand in for.
   dev.optimistic.clear_position();
