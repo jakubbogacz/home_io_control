@@ -1085,3 +1085,106 @@ TEST(PlatformCoverDiscrete, OpenAndCloseQueueTheBinaryPositions) {
   cover.control(open);
   EXPECT_EQ(hub.last_set_position(), 0u);
 }
+
+// ========================================================================================
+// IOHomeCover: restore_position (persist the last observed resting position across reboots)
+// ========================================================================================
+
+namespace {
+
+/// A tilt-capable cover bound to a registered device, with restore_position as given.
+void setup_restorable_cover(MockHub &hub, TestableCover &cover, bool restore) {
+  cover.set_parent(&hub);
+  cover.set_device_id("ABC123");
+  cover.set_device_type(DeviceType::INTERIOR_VENETIAN_BLIND);
+  hub.add_device("ABC123");
+  hub.get_device("ABC123")->type = DeviceType::INTERIOR_VENETIAN_BLIND;
+  cover.set_restore_position(restore);
+  cover.setup();
+}
+
+IoDevice resting_report(float io_position, float tilt) {
+  IoDevice dev{};
+  dev.type = DeviceType::INTERIOR_VENETIAN_BLIND;
+  dev.position = io_position;
+  dev.tilt = tilt;
+  dev.is_stopped = true;
+  return dev;
+}
+
+}  // namespace
+
+class PlatformCoverRestore : public ::testing::Test {
+ protected:
+  void SetUp() override { esphome::test_preferences::wipe(); }
+  void TearDown() override { esphome::test_preferences::wipe(); }
+};
+
+TEST_F(PlatformCoverRestore, ShowsThePersistedPositionAndTiltAfterAReboot) {
+  {
+    MockHub hub;
+    TestableCover cover;
+    setup_restorable_cover(hub, cover, true);
+    hub.trigger_device_update("ABC123", resting_report(84.0f, 40.0f));
+  }
+  esphome::test_preferences::simulate_reboot();
+
+  MockHub hub;
+  TestableCover cover;
+  setup_restorable_cover(hub, cover, true);
+  EXPECT_NEAR(cover.position, 0.16f, 1e-6f) << "IO 84% closed must come back as HA 0.16";
+  EXPECT_NEAR(cover.tilt, 0.40f, 1e-6f);
+
+  // A boot poll answered with a height marker (decoded as unknown) must not blank it.
+  hub.trigger_device_update("ABC123", resting_report(UNKNOWN_POSITION, UNKNOWN_POSITION));
+  EXPECT_NEAR(cover.position, 0.16f, 1e-6f);
+  EXPECT_NEAR(cover.tilt, 0.40f, 1e-6f);
+}
+
+TEST_F(PlatformCoverRestore, ARealReportReplacesTheRestoredValueAndIsPersisted) {
+  {
+    MockHub hub;
+    TestableCover cover;
+    setup_restorable_cover(hub, cover, true);
+    hub.trigger_device_update("ABC123", resting_report(100.0f, 0.0f));
+    hub.trigger_device_update("ABC123", resting_report(25.0f, UNKNOWN_POSITION));
+    EXPECT_NEAR(cover.position, 0.75f, 1e-6f);
+  }
+  esphome::test_preferences::simulate_reboot();
+
+  MockHub hub;
+  TestableCover cover;
+  setup_restorable_cover(hub, cover, true);
+  EXPECT_NEAR(cover.position, 0.75f, 1e-6f) << "the latest resting position is the one restored";
+  EXPECT_NEAR(cover.tilt, 0.0f, 1e-6f) << "an unknown tilt report keeps the stored tilt";
+}
+
+TEST_F(PlatformCoverRestore, MovingReportsAreNotPersisted) {
+  {
+    MockHub hub;
+    TestableCover cover;
+    setup_restorable_cover(hub, cover, true);
+    hub.trigger_device_update("ABC123", resting_report(100.0f, 0.0f));
+    IoDevice moving = resting_report(50.0f, UNKNOWN_POSITION);
+    moving.is_stopped = false;
+    moving.target = 0.0f;
+    hub.trigger_device_update("ABC123", moving);
+  }
+  esphome::test_preferences::simulate_reboot();
+
+  MockHub hub;
+  TestableCover cover;
+  setup_restorable_cover(hub, cover, true);
+  EXPECT_NEAR(cover.position, 0.0f, 1e-6f) << "a mid-travel reading must not be what comes back";
+}
+
+TEST_F(PlatformCoverRestore, IsOffByDefault) {
+  {
+    MockHub hub;
+    TestableCover cover;
+    setup_restorable_cover(hub, cover, false);
+    hub.trigger_device_update("ABC123", resting_report(84.0f, 40.0f));
+  }
+  EXPECT_TRUE(esphome::test_preferences::committed().empty()) << "nothing is written without restore_position";
+  EXPECT_TRUE(esphome::test_preferences::staged().empty());
+}

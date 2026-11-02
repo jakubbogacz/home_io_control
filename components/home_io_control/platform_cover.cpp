@@ -17,6 +17,18 @@ namespace {
 constexpr float IO_POSITION_CLOSED = 100.0F;
 constexpr float IO_POSITION_OPEN = 0.0F;
 
+/// True for a stored percentage that can be shown (rejects UNKNOWN_POSITION, NaN and garbage).
+bool is_valid_percent(float value) { return value >= 0.0F && value <= 100.0F; }
+
+/// Preference key for a cover's persisted state: FNV-1 over a fixed prefix plus the device
+/// address, so it follows the device across YAML reorders and renames.
+uint32_t cover_preference_key(const std::string &device_id) {
+  uint32_t hash = 2166136261U;
+  for (const char c : std::string("hioc_cover_pos_") + device_id)
+    hash = (hash ^ static_cast<uint8_t>(c)) * 16777619U;
+  return hash;
+}
+
 /// Movement direction implied by travelling from one IO position toward another.
 ///
 /// One rule for every direction question this entity asks, so the inversion handling and the
@@ -46,6 +58,56 @@ void IOHomeCover::setup() {
   // After the registration above: the hub only schedules a poll for a registered device.
   if (this->rain_sensor_poll_interval_ms_ != 0)
     this->parent_->set_device_rain_poll_interval(this->device_id_, this->rain_sensor_poll_interval_ms_);
+  if (this->restore_position_)
+    this->restore_persisted_state_();
+}
+
+void IOHomeCover::restore_persisted_state_() {
+  this->pref_ = global_preferences->make_preference<PersistedState>(cover_preference_key(this->device_id_));
+  PersistedState stored{UNKNOWN_POSITION, UNKNOWN_POSITION};
+  if (!this->pref_.load(&stored))
+    return;
+  // No capability check here: at setup the device's features are not resolved yet (they come with
+  // its first report), and a value is only ever persisted for a cover that supports it.
+  bool restored = false;
+  if (is_valid_percent(stored.io_position)) {
+    this->persisted_.io_position = stored.io_position;
+    // Seed the last observed position so an unknown boot report keeps showing it (the assignment
+    // in on_device_update_() is skipped for an unknown reading) and direction inference has a start.
+    this->last_io_position_ = stored.io_position;
+    const float pct = detail::whole_percent(stored.io_position) / 100.0F;
+    this->position = this->effective_invert_() ? pct : 1.0F - pct;
+    restored = true;
+  }
+  if (is_valid_percent(stored.tilt)) {
+    this->persisted_.tilt = stored.tilt;
+    this->tilt = detail::whole_percent(stored.tilt) / 100.0F;
+    restored = true;
+  }
+  if (restored) {
+    ESP_LOGI(TAG, "Device %s: restored persisted IO position %.0f%%, tilt %.0f%% (until the device reports)",
+             this->device_id_.c_str(), stored.io_position, stored.tilt);
+    this->publish_state();
+  }
+}
+
+void IOHomeCover::persist_observed_state_(const IoDevice &dev) {
+  // Observed values only (never optimistic predictions), and only at rest: a moving reading is
+  // stale the moment it is written, and a cut mid-travel is better answered by the boot poll.
+  if (!dev.is_stopped)
+    return;
+  PersistedState next = this->persisted_;
+  if (is_valid_percent(dev.position) && this->supports_intermediate_positions())
+    next.io_position = detail::whole_percent(dev.position);
+  if (is_valid_percent(dev.tilt) && this->supports_tilt())
+    next.tilt = detail::whole_percent(dev.tilt);
+  if (next.io_position == this->persisted_.io_position && next.tilt == this->persisted_.tilt)
+    return;
+  this->persisted_ = next;
+  // save() only stages on ESP32; sync() commits so the value survives an unplug. Writes happen
+  // once per settled move, which is far below NVS wear limits.
+  if (this->pref_.save(&this->persisted_))
+    global_preferences->sync();
 }
 
 cover::CoverTraits IOHomeCover::get_traits() {
@@ -209,6 +271,9 @@ void IOHomeCover::on_device_update_(const std::string &id, const IoDevice &dev) 
     this->last_io_position_ = previous_io_position;
   }
 
+  if (this->restore_position_)
+    this->persist_observed_state_(dev);
+
   this->publish_state();
 }
 
@@ -219,6 +284,7 @@ void IOHomeCover::dump_config() {
   this->log_poll_interval_config_(TAG);
   if (this->rain_sensor_poll_interval_ms_ != 0)
     ESP_LOGCONFIG(TAG, "  Rain Sensor Poll Interval: %" PRIu32 " ms", this->rain_sensor_poll_interval_ms_);
+  ESP_LOGCONFIG(TAG, "  Restore Position: %s", YESNO(this->restore_position_));
   ESP_LOGCONFIG(TAG, "  Supports Tilt: %s", YESNO(this->supports_tilt()));
 }
 

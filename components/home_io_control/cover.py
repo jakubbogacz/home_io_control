@@ -54,6 +54,7 @@ CONF_INVERT_POSITION = "invert_position"
 CONF_SILENT = "silent"
 CONF_SILENT_SWITCH_ID = "_silent_switch_id"
 CONF_OPTIMISTIC_STATE = "optimistic_state"
+CONF_RESTORE_POSITION = "restore_position"
 CONF_RAIN_SENSOR_POLL_INTERVAL = "rain_sensor_poll_interval"
 CONF_RAIN_SENSOR_ID = "_rain_sensor_id"
 CONF_BATTERY = "battery"
@@ -220,6 +221,7 @@ CONFIG_SCHEMA = cv.All(
     )
     .extend({cv.Optional(CONF_BATTERY): cv.boolean})
     .extend({cv.Optional(CONF_OPTIMISTIC_STATE, default=True): cv.boolean})
+    .extend({cv.Optional(CONF_RESTORE_POSITION, default=False): cv.boolean})
     .extend(cv.COMPONENT_SCHEMA),
     _default_device_class,
     _require_silent_kind,
@@ -239,6 +241,8 @@ async def to_code(config):
         cg.add(var.set_invert_position(config[CONF_INVERT_POSITION]))
 
     cg.add(var.set_optimistic_state(config[CONF_OPTIMISTIC_STATE]))
+    if config[CONF_RESTORE_POSITION]:
+        cg.add(var.set_restore_position(True))
     if CONF_SILENT in config:
         cg.add(var.set_silent(config[CONF_SILENT]))
 
